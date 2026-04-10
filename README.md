@@ -16,7 +16,7 @@ Or download the `.pkg` from [Releases](https://github.com/piotrrojek/icloud-keyc
 icloud-keychain set [--sync] <service> <account> <password>
 icloud-keychain get <service> <account>
 icloud-keychain delete <service> <account>
-icloud-keychain list [service-filter] // filtering currently broken
+icloud-keychain list [service-filter]
 ```
 
 `--sync` enables iCloud Keychain sync (requires entitlements). Without it, secrets are stored in the local login keychain.

@@ -167,7 +167,6 @@ pub fn delete(service: []const u8, account: []const u8) KeychainError!void {
 
 /// List all generic password items, optionally filtered by service prefix.
 /// Prints "service / account" lines to stdout.
-/// FIX: currently filtering is broken -- needs investigation.
 pub fn list(service_filter: ?[]const u8) KeychainError!void {
     const dict = try dictCreate();
     defer cfRelease(dict);
@@ -177,11 +176,8 @@ pub fn list(service_filter: ?[]const u8) KeychainError!void {
     dictSet(dict, c.kSecReturnAttributes, c.kCFBooleanTrue);
     dictSet(dict, c.kSecMatchLimit, c.kSecMatchLimitAll);
 
-    if (service_filter) |filter| {
-        const cf_filter = try cfStr(filter);
-        defer cfRelease(cf_filter);
-        dictSet(dict, c.kSecAttrService, cf_filter);
-    }
+    // kSecAttrService only does exact match, so we fetch all items
+    // and filter client-side by prefix.
 
     var result: c.CFTypeRef = null;
     mapStatus(c.SecItemCopyMatching(dict, &result)) catch |err| switch (err) {
@@ -198,13 +194,38 @@ pub fn list(service_filter: ?[]const u8) KeychainError!void {
     const count: usize = @intCast(c.CFArrayGetCount(array));
     const out = std.fs.File.stdout();
 
+    var printed: usize = 0;
     for (0..count) |i| {
         const item: c.CFDictionaryRef = @ptrCast(c.CFArrayGetValueAtIndex(array, @intCast(i)));
+
+        if (service_filter) |filter| {
+            var buf: [256]u8 = undefined;
+            const service_name = getAttribute(item, c.kSecAttrService, &buf) orelse continue;
+            if (!std.mem.startsWith(u8, service_name, filter)) continue;
+        }
+
         printAttribute(out, item, c.kSecAttrService);
         out.writeAll(" / ") catch {};
         printAttribute(out, item, c.kSecAttrAccount);
         out.writeAll("\n") catch {};
+        printed += 1;
     }
+
+    if (printed == 0) {
+        std.fs.File.stdout().writeAll("No items found.\n") catch {};
+    }
+}
+
+/// Extract a string attribute from a CFDictionary into the provided buffer.
+fn getAttribute(dict: c.CFDictionaryRef, key: anytype, buf: *[256]u8) ?[]const u8 {
+    var value: ?*const anyopaque = null;
+    if (c.CFDictionaryGetValueIfPresent(dict, @as(?*const anyopaque, @ptrCast(key)), &value) == 0) return null;
+    const cf_str: c.CFStringRef = @ptrCast(value);
+    if (c.CFStringGetCString(cf_str, buf, buf.len, c.kCFStringEncodingUTF8) != 0) {
+        const len = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
+        return buf[0..len];
+    }
+    return null;
 }
 
 fn printAttribute(out: std.fs.File, dict: c.CFDictionaryRef, key: anytype) void {

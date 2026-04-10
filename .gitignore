@@ -1,0 +1,10 @@
+.zig-cache/
+zig-out/
+release-build/
+main
+*.o
+*.pkg
+*.zip
+.DS_Store
+DeveloperID.provisionprofile
+bundle.sh

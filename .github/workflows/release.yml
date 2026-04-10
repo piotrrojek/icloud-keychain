@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Decode signing certificate
+        env:
+          CERTIFICATE_P12: ${{ secrets.CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$CERTIFICATE_P12" | base64 --decode > certificate.p12
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+
+          security import certificate.p12 -k build.keychain \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/pkgbuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+          rm certificate.p12
+
+      - name: Decode provisioning profile
+        env:
+          PROVISIONING_PROFILE: ${{ secrets.PROVISIONING_PROFILE }}
+        run: echo "$PROVISIONING_PROFILE" | base64 --decode > DeveloperID.provisionprofile
+
+      - name: Store notarization credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "notary-profile" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD"
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign, notarize, and package
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          sed -i '' "s/^VERSION=.*/VERSION=\"$VERSION\"/" release.sh
+          chmod +x release.sh
+          ./release.sh
+
+      - name: Create Homebrew tarball
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          # Package the signed universal .app bundle as a tarball for Homebrew.
+          # We ship the universal binary as-is to preserve the code signature.
+          tar -czf "release-build/icloud-keychain-${VERSION}-macos-universal.tar.gz" \
+            -C release-build \
+            icloud-keychain.app
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          PKG="release-build/icloud-keychain-${VERSION}-macos-universal.pkg"
+          TAR="release-build/icloud-keychain-${VERSION}-macos-universal.tar.gz"
+
+          gh release create "$GITHUB_REF_NAME" \
+            "$PKG" "$TAR" \
+            --title "icloud-keychain v${VERSION}" \
+            --generate-notes
+
+      - name: Print Homebrew SHA256
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          echo "=== Update this in Formula/icloud-keychain.rb ==="
+          echo "sha256: $(shasum -a 256 release-build/icloud-keychain-${VERSION}-macos-universal.tar.gz | cut -d' ' -f1)"

@@ -5,10 +5,11 @@ CLI tool to manage macOS Keychain items with optional iCloud sync. Written in Zi
 ## Install
 
 ```bash
+brew tap piotrrojek/tap
 brew install piotrrojek/tap/icloud-keychain
 ```
 
-Or download the `.pkg` from [Releases](https://github.com/piotrrojek/icloud-keychain/releases) or [piotrrojek.io](https://piotrrojek.io/icloud-keychain/icloud-keychain-1.0.0-macos-universal.pkg).
+Or download the `.pkg` from [Releases](https://github.com/piotrrojek/icloud-keychain/releases).
 
 ## Usage
 

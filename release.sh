@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="dev"
 IDENTITY="Developer ID Application: Otherland Labs sp. z o.o. (RE4JN752MW)"
 INSTALLER_IDENTITY="Developer ID Installer: Otherland Labs sp. z o.o. (RE4JN752MW)"
 BUNDLE_ID="com.otherlandlabs.icloud-keychain"

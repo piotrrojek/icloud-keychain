@@ -70,11 +70,14 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          # Package the signed universal .app bundle as a tarball for Homebrew.
-          # We ship the universal binary as-is to preserve the code signature.
+          # Package the signed universal .app bundle + zsh completion as a tarball
+          # for Homebrew. We ship the universal binary as-is to preserve the code
+          # signature. The completion file is installed by the Formula into
+          # zsh_completion (see homebrew-tap/Formula/icloud-keychain.rb).
+          cp -R completions release-build/completions
           tar -czf "release-build/icloud-keychain-${VERSION}-macos-universal.tar.gz" \
             -C release-build \
-            icloud-keychain.app
+            icloud-keychain.app completions
 
       - name: Upload release assets
         env:

@@ -148,8 +148,10 @@ PKG_ROOT="$BUILD_DIR/pkg-root"
 PKG_SCRIPTS="$BUILD_DIR/pkg-scripts"
 rm -rf "$PKG_ROOT" "$PKG_SCRIPTS"
 mkdir -p "$PKG_ROOT/usr/local/lib"
+mkdir -p "$PKG_ROOT/usr/local/share/zsh/site-functions"
 mkdir -p "$PKG_SCRIPTS"
 cp -R "$APP" "$PKG_ROOT/usr/local/lib/"
+cp "$SCRIPT_DIR/completions/_icloud-keychain" "$PKG_ROOT/usr/local/share/zsh/site-functions/"
 
 # Post-install script creates the symlink so `icloud-keychain` is on PATH
 cat > "$PKG_SCRIPTS/postinstall" << 'POSTINSTALL'
@@ -165,6 +167,7 @@ cat > "$PKG_SCRIPTS/preinstall" << 'PREINSTALL'
 # Remove previous installation if present
 rm -f /usr/local/bin/icloud-keychain
 rm -rf /usr/local/lib/icloud-keychain.app
+rm -f /usr/local/share/zsh/site-functions/_icloud-keychain
 exit 0
 PREINSTALL
 chmod +x "$PKG_SCRIPTS/preinstall"

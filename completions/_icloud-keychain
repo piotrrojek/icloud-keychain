@@ -1,0 +1,107 @@
+#compdef icloud-keychain
+#
+# Zsh completion for icloud-keychain.
+#
+# Service and account names are completed live from `icloud-keychain list`,
+# which only reads keychain metadata — no Keychain auth prompt is triggered.
+#
+# Only entries whose service name contains a '/' are offered — these are
+# treated as user-managed namespaced entries (e.g. dotfiles/github-token).
+# System keychain entries (WiFi passwords, Apple internal services, etc.)
+# are excluded as noise. To include them, set:
+#   zstyle ':icloud-keychain:include-system' enabled yes
+
+_icloud-keychain() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    _arguments -C \
+        '(- *)'{-v,--version}'[Show version and exit]' \
+        '1: :->command' \
+        '*:: :->args'
+
+    case $state in
+        command)
+            local -a cmds=(
+                'set:Store a secret (optionally synced via iCloud Keychain)'
+                'get:Retrieve a secret'
+                'delete:Delete a secret'
+                'list:List entries (optionally filtered by service prefix)'
+            )
+            _describe -t commands 'command' cmds
+            ;;
+        args)
+            __icloud_keychain_subcommand
+            ;;
+    esac
+}
+
+__icloud_keychain_subcommand() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+    local cmd="${words[1]}"
+
+    case $cmd in
+        set)
+            _arguments -C \
+                '--sync[Enable iCloud Keychain sync (requires entitlements)]' \
+                '1:service:->service' \
+                '2:account:->account_for_service' \
+                '3:password (or - for stdin):()'
+            ;;
+        get|delete)
+            _arguments -C \
+                '1:service:->service' \
+                '2:account:->account_for_service'
+            ;;
+        list)
+            _arguments -C \
+                '1:service prefix:->service'
+            ;;
+    esac
+
+    case $state in
+        service)
+            __icloud_keychain_services
+            ;;
+        account_for_service)
+            __icloud_keychain_accounts "${line[1]}"
+            ;;
+    esac
+}
+
+# Build an awk filter expression for service names. By default we exclude
+# entries with no '/' in the service name (system keychain noise). When the
+# user opts in via the zstyle, the filter passes everything.
+__icloud_keychain_filter() {
+    local include_system
+    zstyle -s ':icloud-keychain:include-system' enabled include_system
+    if [[ "$include_system" == (yes|y|true|1) ]]; then
+        print -r -- 'NF>=2'
+    else
+        print -r -- 'NF>=2 && index($1, "/") > 0'
+    fi
+}
+
+__icloud_keychain_services() {
+    local filter="$(__icloud_keychain_filter)"
+    local -a services
+    services=(${(uf)"$(icloud-keychain list 2>/dev/null | awk -F ' / ' "$filter "'{print $1}' | sort -u)"})
+    _describe -t services 'service' services
+}
+
+__icloud_keychain_accounts() {
+    local svc="$1"
+    local -a accounts
+    if [[ -n "$svc" ]]; then
+        # Exact service match — `list <prefix>` already filters server-side,
+        # but we re-check $1 in case the typed service is a prefix only.
+        accounts=(${(uf)"$(icloud-keychain list "$svc" 2>/dev/null | awk -F ' / ' -v s="$svc" '$1==s {print $2}' | sort -u)"})
+    else
+        local filter="$(__icloud_keychain_filter)"
+        accounts=(${(uf)"$(icloud-keychain list 2>/dev/null | awk -F ' / ' "$filter "'{print $2}' | sort -u)"})
+    fi
+    _describe -t accounts 'account' accounts
+}
+
+_icloud-keychain "$@"

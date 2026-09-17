@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read Zig pin
+        id: zig
+        run: echo "version=$(tr -d '[:space:]' < .zig-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ steps.zig.outputs.version }}
+
+      - name: Version
+        run: scripts/version.sh --check
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test
+
+      - name: zig fmt
+        run: zig fmt --check build.zig build.zig.zon src
+
+      - name: Shell syntax
+        run: |
+          bash -n release.sh
+          bash -n scripts/version.sh
+          bash -n scripts/smoke-release.sh
+          bash -n scripts/homebrew-formula.sh
+          zsh -n completions/_icloud-keychain
+
+      - name: CLI smoke
+        run: python3 tests/cli_smoke.py zig-out/bin/icloud-keychain
+
+      - name: Completions
+        run: zsh tests/completions.zsh
+
+      - name: Release helpers
+        run: python3 tests/release_test.py
+
+      - name: Integration cleanup
+        run: python3 -m unittest discover -s tests -p 'test_integration_cleanup.py' -v

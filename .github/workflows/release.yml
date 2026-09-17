@@ -10,14 +10,36 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v6
+
+      - name: Read Zig pin
+        id: zig
+        run: echo "version=$(tr -d '[:space:]' < .zig-version)" >> "$GITHUB_OUTPUT"
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ steps.zig.outputs.version }}
+
+      - name: Check tag, version, and tests
+        run: |
+          scripts/version.sh --check
+          zig build
+          zig build test
+          zig fmt --check build.zig build.zig.zon src
+          bash -n release.sh
+          bash -n scripts/version.sh
+          bash -n scripts/smoke-release.sh
+          bash -n scripts/homebrew-formula.sh
+          zsh -n completions/_icloud-keychain
+          python3 tests/cli_smoke.py zig-out/bin/icloud-keychain
+          zsh tests/completions.zsh
+          python3 tests/release_test.py
+          python3 -m unittest discover -s tests -p 'test_integration_cleanup.py' -v
 
       - name: Decode signing certificate
         env:
@@ -54,47 +76,21 @@ jobs:
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_PASSWORD"
 
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
       - name: Build, sign, notarize, and package
-        env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          sed -i '' "s/^VERSION=.*/VERSION=\"$VERSION\"/" release.sh
-          chmod +x release.sh
+          chmod +x release.sh scripts/version.sh scripts/smoke-release.sh scripts/homebrew-formula.sh
           ./release.sh
-
-      - name: Create Homebrew tarball
-        env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
-        run: |
-          # Package the signed universal .app bundle + zsh completion as a tarball
-          # for Homebrew. We ship the universal binary as-is to preserve the code
-          # signature. The completion file is installed by the Formula into
-          # zsh_completion (see homebrew-tap/Formula/icloud-keychain.rb).
-          cp -R completions release-build/completions
-          tar -czf "release-build/icloud-keychain-${VERSION}-macos-universal.tar.gz" \
-            -C release-build \
-            icloud-keychain.app completions
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
+          VERSION="$(scripts/version.sh)"
           PKG="release-build/icloud-keychain-${VERSION}-macos-universal.pkg"
           TAR="release-build/icloud-keychain-${VERSION}-macos-universal.tar.gz"
+          FORMULA="release-build/icloud-keychain.rb"
 
           gh release create "$GITHUB_REF_NAME" \
-            "$PKG" "$TAR" \
+            "$PKG" "$TAR" "$FORMULA" \
             --title "icloud-keychain v${VERSION}" \
             --generate-notes
-
-      - name: Print Homebrew SHA256
-        env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
-        run: |
-          echo "=== Update this in Formula/icloud-keychain.rb ==="
-          echo "sha256: $(shasum -a 256 release-build/icloud-keychain-${VERSION}-macos-universal.tar.gz | cut -d' ' -f1)"

@@ -1,57 +1,48 @@
-# Homebrew Distribution
+# Homebrew distribution
 
-This app requires codesigning + entitlements + provisioning profile for iCloud Keychain access, so Homebrew can't build from source. Instead, a pre-built signed/notarized `.app` bundle is distributed via a Homebrew tap.
-
-Users install via:
+The CLI needs a signed `.app` bundle (Developer ID + entitlements + provisioning profile) for iCloud access, so Homebrew cannot build from source. Releases ship a notarized universal tarball; the tap formula only downloads that artifact.
 
 ```bash
 brew install piotrrojek/tap/icloud-keychain
 ```
 
-## Setup
+A newer git checkout is not what `brew` runs. The installed formula stays on the last approved tap revision until someone copies the generated formula into `piotrrojek/homebrew-tap` and that change is merged. There is no automatic tap publish.
 
-### 1. GitHub Secrets
+## Upgrade an existing installation
 
-Add these to the `piotrrojek/icloud-keychain` repo settings (Settings > Secrets and variables > Actions):
+Homebrew 6 requires explicit trust for non-official taps. A fully qualified fresh install grants trust to that formula, but an older installation may still need it before checking for updates. Prefer formula-level trust rather than trusting every current and future item in a tap:
+
+```bash
+brew trust --formula piotrrojek/tap/icloud-keychain
+brew update
+brew upgrade piotrrojek/tap/icloud-keychain
+icloud-keychain --version
+```
+
+`brew update` refreshes definitions; `brew upgrade` installs the new executable. Check `brew outdated --verbose piotrrojek/tap/icloud-keychain` to inspect availability without upgrading. Version 2 requires `--local` or `--sync` for deletion; review callers before upgrading.
+
+## GitHub Actions secrets
+
+Store these in the `piotrrojek/icloud-keychain` repo (Settings → Secrets and variables → Actions). Do not export them into shell dotfiles.
 
 | Secret | Value |
 |---|---|
-| `CERTIFICATE_P12` | Base64-encoded `.p12` export of Developer ID Application + Installer certs |
+| `CERTIFICATE_P12` | Base64-encoded `.p12` of Developer ID Application + Installer certs |
 | `CERTIFICATE_PASSWORD` | Password for the `.p12` |
 | `PROVISIONING_PROFILE` | Base64-encoded `DeveloperID.provisionprofile` |
-| `APPLE_ID` | Your Apple ID email |
+| `APPLE_ID` | Apple ID email |
 | `APPLE_TEAM_ID` | `RE4JN752MW` |
 | `APPLE_APP_PASSWORD` | App-specific password from appleid.apple.com |
 
-To encode files as base64:
+Encode files with `base64 -i certificate.p12` (copy by hand into the secret field).
 
-```bash
-base64 -i certificate.p12 | pbcopy
-base64 -i DeveloperID.provisionprofile | pbcopy
-```
+## Release (manual)
 
-### 2. Create the Homebrew tap repo
+1. Land the version in `build.zig.zon` (single source of truth). Tag `v` plus that version, e.g. `v2.0.0`.
+2. The release workflow checks the tag against the manifest and runs tests **before** decoding credentials, then signs, notarizes, and uploads:
+   - `icloud-keychain-<version>-macos-universal.pkg`
+   - `icloud-keychain-<version>-macos-universal.tar.gz`
+   - `icloud-keychain.rb` (generated from that tarball’s SHA-256 and tag)
+3. After the GitHub Release looks right, copy `icloud-keychain.rb` into `piotrrojek/homebrew-tap` in a separate, reviewed commit. Do not point scripts at the tap repo.
 
-```bash
-gh repo create piotrrojek/homebrew-tap --public --clone
-cd homebrew-tap
-mkdir -p Formula
-cp /path/to/icloud-keychain-zig/Formula/icloud-keychain.rb Formula/
-git add Formula/icloud-keychain.rb
-git commit -m "Add icloud-keychain formula"
-git push
-```
-
-### 3. Release
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-CI will build, sign, notarize, and upload to GitHub Releases. Check the CI output for the SHA256 hash, then update `Formula/icloud-keychain.rb` in the `homebrew-tap` repo with the correct `sha256` and `version`.
-
-## How it works
-
-- `.github/workflows/release.yml` — on tag push, builds universal binary, creates signed `.app` bundle, notarizes it, packages as `.pkg` and `.tar.gz`, uploads both to GitHub Releases
-- `Formula/icloud-keychain.rb` — template Homebrew formula that downloads the `.tar.gz`, installs the `.app` bundle, and symlinks the binary into `bin`
+`scripts/homebrew-formula.sh` can regenerate the formula from a local tarball. It never writes the tap.

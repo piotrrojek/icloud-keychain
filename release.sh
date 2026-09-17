@@ -1,30 +1,30 @@
 #!/bin/bash
-# release.sh — Build, bundle, sign, notarize, and package for distribution.
+# Build, bundle, sign, notarize, and package for distribution.
 #
 # Prerequisites:
 #   1. Developer ID Application certificate installed
-#   2. Developer ID provisioning profile downloaded from Apple Developer portal
-#      and placed at: ./DeveloperID.provisionprofile
-#   3. Notarization credentials stored:
-#      xcrun notarytool store-credentials "notary-profile" \
-#          --apple-id "YOUR_EMAIL" --team-id "RE4JN752MW"
-#   4. Xcode installed (for cross-compilation SDK)
+#   2. Developer ID provisioning profile at ./DeveloperID.provisionprofile
+#      or passed as argv[1]
+#   3. Notarization credentials stored in notarytool (not in shell dotfiles)
+#   4. Zig 0.15.2 on PATH (see .zig-version)
 #
 # Usage: ./release.sh [path/to/DeveloperID.provisionprofile]
+#
+# Env overrides: IDENTITY, INSTALLER_IDENTITY, BUNDLE_ID, NOTARY_PROFILE, SDKROOT
+# Use a compatible developer installation (CI pins Xcode 16.3); see README.md.
 
 set -euo pipefail
 
-VERSION="dev"
-IDENTITY="Developer ID Application: Otherland Labs sp. z o.o. (RE4JN752MW)"
-INSTALLER_IDENTITY="Developer ID Installer: Otherland Labs sp. z o.o. (RE4JN752MW)"
-BUNDLE_ID="com.otherlandlabs.icloud-keychain"
-NOTARY_PROFILE="notary-profile"
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+VERSION="$("$SCRIPT_DIR/scripts/version.sh" --check)"
+IDENTITY="${IDENTITY:-Developer ID Application: Otherland Labs sp. z o.o. (RE4JN752MW)}"
+INSTALLER_IDENTITY="${INSTALLER_IDENTITY:-Developer ID Installer: Otherland Labs sp. z o.o. (RE4JN752MW)}"
+BUNDLE_ID="${BUNDLE_ID:-com.otherlandlabs.icloud-keychain}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-notary-profile}"
+
 BUILD_DIR="$SCRIPT_DIR/release-build"
 APP="$BUILD_DIR/icloud-keychain.app"
 
-# Find provisioning profile
 PROFILE="${1:-$SCRIPT_DIR/DeveloperID.provisionprofile}"
 if [ ! -f "$PROFILE" ]; then
     echo "Error: Provisioning profile not found at: $PROFILE"
@@ -36,45 +36,45 @@ if [ ! -f "$PROFILE" ]; then
     exit 1
 fi
 
-# Find Xcode SDK (needed for cross-compilation)
-XCODE_SDK="/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
-if [ ! -d "$XCODE_SDK" ]; then
-    echo "Error: Xcode SDK not found. Install Xcode from the App Store."
+SDKROOT="${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}"
+if [ -z "$SDKROOT" ] || [ ! -d "$SDKROOT" ]; then
+    echo "Error: macOS SDK not found via xcrun --sdk macosx --show-sdk-path"
     exit 1
 fi
 
-echo "Building universal binary (arm64 + x86_64)"
+echo "Version $VERSION"
+echo "Building universal binary (arm64 + x86_64) with $SDKROOT"
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR"
 
-# Zig cross-compiles both architectures using the Xcode SDK for framework headers.
-# We use zig build-exe directly (instead of zig build) because cross-compilation
-# needs explicit sysroot and framework paths that the build system doesn't auto-detect.
 cd "$SCRIPT_DIR"
 
-zig build-exe src/main.zig -OReleaseSafe \
-    -target aarch64-macos \
-    --sysroot "$XCODE_SDK" \
-    -F "$XCODE_SDK/System/Library/Frameworks" \
-    -idirafter "$XCODE_SDK/usr/include" \
-    -framework Security -framework CoreFoundation \
-    -femit-bin="$BUILD_DIR/icloud-keychain-arm64"
-echo "  arm64: OK"
+build_arch() {
+    local arch="$1"
+    local dest="$2"
+    local prefix="$BUILD_DIR/prefix-$arch"
+    rm -rf "$prefix"
+    zig build -Doptimize=ReleaseSafe -Dtarget="${arch}-macos" \
+        --sysroot "$SDKROOT" \
+        -p "$prefix"
+    local built="$prefix/bin/icloud-keychain"
+    if [ ! -f "$built" ]; then
+        echo "error: missing $built" >&2
+        exit 1
+    fi
+    cp "$built" "$dest"
+    echo "  $arch: OK"
+}
 
-zig build-exe src/main.zig -OReleaseSafe \
-    -target x86_64-macos \
-    --sysroot "$XCODE_SDK" \
-    -F "$XCODE_SDK/System/Library/Frameworks" \
-    -idirafter "$XCODE_SDK/usr/include" \
-    -framework Security -framework CoreFoundation \
-    -femit-bin="$BUILD_DIR/icloud-keychain-x86_64"
-echo "  x86_64: OK"
+build_arch aarch64 "$BUILD_DIR/icloud-keychain-arm64"
+build_arch x86_64 "$BUILD_DIR/icloud-keychain-x86_64"
 
 lipo -create \
     -output "$BUILD_DIR/icloud-keychain" \
     "$BUILD_DIR/icloud-keychain-arm64" \
     "$BUILD_DIR/icloud-keychain-x86_64"
-rm "$BUILD_DIR/icloud-keychain-arm64" "$BUILD_DIR/icloud-keychain-x86_64"
+rm -f "$BUILD_DIR/icloud-keychain-arm64" "$BUILD_DIR/icloud-keychain-x86_64"
+rm -rf "$BUILD_DIR/prefix-aarch64" "$BUILD_DIR/prefix-x86_64"
 
 echo "  universal: OK ($(du -h "$BUILD_DIR/icloud-keychain" | cut -f1 | xargs))"
 
@@ -108,7 +108,7 @@ cat > "$APP/Contents/Info.plist" << EOF
 </dict>
 </plist>
 EOF
-echo "  Bundle created"
+echo "  Bundle created ($VERSION)"
 
 echo ""
 echo "Signing with Developer ID"
@@ -125,20 +125,18 @@ codesign -f -s "$IDENTITY" \
     --identifier "$BUNDLE_ID" \
     "$APP"
 
-# Verify
+codesign --verify --deep --strict "$APP"
 codesign -vvv --deep --strict "$APP"
 echo "  Signature verified"
 
 echo ""
 echo "Notarizing"
-# Package for submission
 ditto -c -k --keepParent "$APP" "$BUILD_DIR/icloud-keychain.zip"
 
 xcrun notarytool submit "$BUILD_DIR/icloud-keychain.zip" \
     --keychain-profile "$NOTARY_PROFILE" \
     --wait
 
-# Staple the notarization ticket to the .app
 xcrun stapler staple "$APP"
 echo "  Notarization complete"
 
@@ -153,7 +151,6 @@ mkdir -p "$PKG_SCRIPTS"
 cp -R "$APP" "$PKG_ROOT/usr/local/lib/"
 cp "$SCRIPT_DIR/completions/_icloud-keychain" "$PKG_ROOT/usr/local/share/zsh/site-functions/"
 
-# Post-install script creates the symlink so `icloud-keychain` is on PATH
 cat > "$PKG_SCRIPTS/postinstall" << 'POSTINSTALL'
 #!/bin/bash
 mkdir -p /usr/local/bin
@@ -161,10 +158,8 @@ ln -sf /usr/local/lib/icloud-keychain.app/Contents/MacOS/icloud-keychain /usr/lo
 POSTINSTALL
 chmod +x "$PKG_SCRIPTS/postinstall"
 
-# Pre-uninstall info (shown if user wants to remove manually)
 cat > "$PKG_SCRIPTS/preinstall" << 'PREINSTALL'
 #!/bin/bash
-# Remove previous installation if present
 rm -f /usr/local/bin/icloud-keychain
 rm -rf /usr/local/lib/icloud-keychain.app
 rm -f /usr/local/share/zsh/site-functions/_icloud-keychain
@@ -184,8 +179,6 @@ pkgbuild \
 
 echo "  Package built"
 
-rm -rf "$PKG_ROOT" "$PKG_SCRIPTS" "$BUILD_DIR/icloud-keychain.zip" "$BUILD_DIR/icloud-keychain"
-
 echo ""
 echo "Notarizing installer package"
 xcrun notarytool submit "$PKG" \
@@ -196,6 +189,21 @@ xcrun stapler staple "$PKG"
 echo "  Installer notarized"
 
 echo ""
+echo "Creating Homebrew tarball"
+TAR_STAGE="$BUILD_DIR/tar-stage"
+rm -rf "$TAR_STAGE"
+mkdir -p "$TAR_STAGE/completions"
+cp -R "$APP" "$TAR_STAGE/"
+cp "$SCRIPT_DIR/completions/_icloud-keychain" "$TAR_STAGE/completions/"
+TAR="$BUILD_DIR/icloud-keychain-${VERSION}-macos-universal.tar.gz"
+tar -czf "$TAR" -C "$TAR_STAGE" icloud-keychain.app completions
+rm -rf "$TAR_STAGE" "$PKG_ROOT" "$PKG_SCRIPTS" "$BUILD_DIR/icloud-keychain.zip" "$BUILD_DIR/icloud-keychain"
+
+"$SCRIPT_DIR/scripts/smoke-release.sh" "$TAR" "$VERSION"
+"$SCRIPT_DIR/scripts/homebrew-formula.sh" "$TAR" "$BUILD_DIR/icloud-keychain.rb"
+
+echo ""
 echo " Done "
-echo "Distribution package:"
-echo "  $PKG"
+echo "Distribution package: $PKG"
+echo "Homebrew tarball:     $TAR"
+echo "Homebrew formula:     $BUILD_DIR/icloud-keychain.rb"

@@ -2,8 +2,14 @@
 #
 # Zsh completion for icloud-keychain.
 #
-# Service and account names are completed live from `icloud-keychain list`,
-# which only reads keychain metadata — no Keychain auth prompt is triggered.
+# Service and account names come from dedicated NUL-terminated list modes so
+# names may contain spaces, colons, slashes, newlines, and the human " / "
+# delimiter. Consume that NUL output directly into arrays — never round-trip
+# through newline-separated text.
+#
+# Completions forward --local/--sync/--scope only when the user already typed
+# one (from opt_args). --accounts-only uses an exact service after --.
+# Password/secret values are never completed.
 #
 # Only entries whose service name contains a '/' are offered — these are
 # treated as user-managed namespaced entries (e.g. dotfiles/github-token).
@@ -16,6 +22,7 @@ _icloud-keychain() {
     typeset -A opt_args
 
     _arguments -C \
+        '(- *)'{-h,--help}'[Show usage and exit]' \
         '(- *)'{-v,--version}'[Show version and exit]' \
         '1: :->command' \
         '*:: :->args'
@@ -23,10 +30,11 @@ _icloud-keychain() {
     case $state in
         command)
             local -a cmds=(
-                'set:Store a secret (optionally synced via iCloud Keychain)'
+                'set:Store a secret (defaults to local keychain)'
                 'get:Retrieve a secret'
-                'delete:Delete a secret'
-                'list:List entries (optionally filtered by service prefix)'
+                'delete:Delete a secret (requires --local or --sync)'
+                'list:List entries (prefix filter; --accounts-only is exact)'
+                'doctor:Report signing and iCloud sync prerequisites'
             )
             _describe -t commands 'command' cmds
             ;;
@@ -43,20 +51,52 @@ __icloud_keychain_subcommand() {
 
     case $cmd in
         set)
-            _arguments -C \
-                '--sync[Enable iCloud Keychain sync (requires entitlements)]' \
+            _arguments -C -S \
+                '(- *)'{-h,--help}'[Show usage and exit]' \
+                '(--sync --local --scope)'{--sync,--local}'[Select iCloud or local scope]' \
+                '(--sync --local)--scope[Keychain scope]:scope:(local icloud)' \
+                '(--sync --local)--scope=[Keychain scope]:scope:(local icloud)' \
+                '--stdin[Read password from stdin]' \
+                '--raw[Preserve stdin bytes exactly]' \
+                '--allow-empty[Allow an empty password]' \
                 '1:service:->service' \
                 '2:account:->account_for_service' \
                 '3:password (or - for stdin):()'
             ;;
-        get|delete)
-            _arguments -C \
+        get)
+            _arguments -C -S \
+                '(- *)'{-h,--help}'[Show usage and exit]' \
+                '(--sync --local --scope)'{--sync,--local}'[Select iCloud or local scope]' \
+                '(--sync --local)--scope[Keychain scope]:scope:(local icloud any)' \
+                '(--sync --local)--scope=[Keychain scope]:scope:(local icloud any)' \
+                '--raw[Write the secret with no added newline]' \
+                '1:service:->service' \
+                '2:account:->account_for_service'
+            ;;
+        delete)
+            _arguments -C -S \
+                '(- *)'{-h,--help}'[Show usage and exit]' \
+                '(--sync --local --scope)'{--sync,--local}'[Required: iCloud or local scope]' \
+                '(--sync --local)--scope[Keychain scope]:scope:(local icloud)' \
+                '(--sync --local)--scope=[Keychain scope]:scope:(local icloud)' \
                 '1:service:->service' \
                 '2:account:->account_for_service'
             ;;
         list)
+            _arguments -C -S \
+                '(- *)'{-h,--help}'[Show usage and exit]' \
+                '(--sync --local --scope)'{--sync,--local}'[Select iCloud or local scope]' \
+                '(--sync --local)--scope[Keychain scope]:scope:(local icloud any)' \
+                '(--sync --local)--scope=[Keychain scope]:scope:(local icloud any)' \
+                '(--json --names-only --accounts-only)--json[JSON array of service/account/scope]' \
+                '(--json --names-only --accounts-only)--names-only[Unique service names]' \
+                '(--json --names-only --accounts-only)--accounts-only[Unique accounts; argument is exact service]' \
+                '(--json)--null[NUL-terminate --names-only/--accounts-only output]' \
+                '1:service or prefix:->service'
+            ;;
+        doctor)
             _arguments -C \
-                '1:service prefix:->service'
+                '(- *)'{-h,--help}'[Show usage and exit]'
             ;;
     esac
 
@@ -70,38 +110,63 @@ __icloud_keychain_subcommand() {
     esac
 }
 
-# Build an awk filter expression for service names. By default we exclude
-# entries with no '/' in the service name (system keychain noise). When the
-# user opts in via the zstyle, the filter passes everything.
-__icloud_keychain_filter() {
+__icloud_keychain_include_system() {
     local include_system
     zstyle -s ':icloud-keychain:include-system' enabled include_system
-    if [[ "$include_system" == (yes|y|true|1) ]]; then
-        print -r -- 'NF>=2'
-    else
-        print -r -- 'NF>=2 && index($1, "/") > 0'
+    [[ "$include_system" == (yes|y|true|1) ]]
+}
+
+# Sets $reply to the scope flags the user already typed, or empty.
+__icloud_keychain_scope_flags() {
+    reply=()
+    if (( ${+opt_args[--local]} )); then
+        reply=(--local)
+    elif (( ${+opt_args[--sync]} )); then
+        reply=(--sync)
+    elif (( ${+opt_args[--scope]} )); then
+        reply=(--scope "${opt_args[--scope]}")
+    elif (( ${+opt_args[--scope=]} )); then
+        reply=(--scope="${opt_args[--scope=]}")
     fi
 }
 
+__icloud_keychain_nul_array() {
+    reply=("${(@0)$("$@" 2>/dev/null)}")
+}
+
 __icloud_keychain_services() {
-    local filter="$(__icloud_keychain_filter)"
-    local -a services
-    services=(${(uf)"$(icloud-keychain list 2>/dev/null | awk -F ' / ' "$filter "'{print $1}' | sort -u)"})
-    _describe -t services 'service' services
+    local -a services filtered scope_flags
+    local s
+    __icloud_keychain_scope_flags
+    scope_flags=("$reply[@]")
+    __icloud_keychain_nul_array icloud-keychain list "${scope_flags[@]}" --names-only --null
+    services=("$reply[@]")
+    if __icloud_keychain_include_system; then
+        filtered=("$services[@]")
+    else
+        for s in "$services[@]"; do
+            [[ -n "$s" && "$s" == */* ]] && filtered+="$s"
+        done
+    fi
+    (( ${#filtered} )) && compadd -- "$filtered[@]"
 }
 
 __icloud_keychain_accounts() {
     local svc="$1"
-    local -a accounts
+    local -a accounts scope_flags
+    local s
+    __icloud_keychain_scope_flags
+    scope_flags=("$reply[@]")
     if [[ -n "$svc" ]]; then
-        # Exact service match — `list <prefix>` already filters server-side,
-        # but we re-check $1 in case the typed service is a prefix only.
-        accounts=(${(uf)"$(icloud-keychain list "$svc" 2>/dev/null | awk -F ' / ' -v s="$svc" '$1==s {print $2}' | sort -u)"})
+        __icloud_keychain_nul_array icloud-keychain list "${scope_flags[@]}" --accounts-only --null -- "$svc"
     else
-        local filter="$(__icloud_keychain_filter)"
-        accounts=(${(uf)"$(icloud-keychain list 2>/dev/null | awk -F ' / ' "$filter "'{print $2}' | sort -u)"})
+        __icloud_keychain_nul_array icloud-keychain list "${scope_flags[@]}" --accounts-only --null
     fi
-    _describe -t accounts 'account' accounts
+    accounts=()
+    for s in "$reply[@]"; do
+        [[ -n "$s" ]] && accounts+="$s"
+    done
+    (( ${#accounts} )) && compadd -- "$accounts[@]"
 }
 
 _icloud-keychain "$@"
